@@ -29,8 +29,10 @@ PERINTAH BOT:
 #  IMPORTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+import json
 import logging
 import sqlite3
+import subprocess
 import sys
 import time
 import threading
@@ -348,46 +350,60 @@ def fetch_bi_rate_live() -> float:
     return BI_RATE
 
 
+IDX_API_UA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+IDX_API_REFERER  = "https://www.idx.co.id/en/market-data/trading-summary/stock-summary"
+
+
+def _idx_get_stock_summary(date_str: str) -> list:
+    """Hit IDX's own TradingSummary/GetStockSummary JSON endpoint (no auth needed).
+    Cloudflare in front of idx.co.id 403s the `requests`/urllib3 TLS fingerprint, but
+    curl.exe passes — same workaround already proven in bandar-broksum/broker_data.py,
+    so shell out instead of pulling in a TLS-impersonation library for one endpoint."""
+    url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={date_str}"
+    result = subprocess.run(
+        ["curl", "-s", "-A", IDX_API_UA, "-H", f"Referer: {IDX_API_REFERER}", url],
+        capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return []
+    try:
+        return json.loads(result.stdout).get("data", [])
+    except json.JSONDecodeError:
+        return []
+
+
 def fetch_foreign_flow() -> Optional[dict]:
+    """Net foreign flow (whole market) from IDX's official per-stock trading summary API,
+    instead of regex-guessing numbers out of the rendered HTML trading-summary page."""
     now = datetime.now(WIB)
     if (_foreign_cache["data"] is not None and _foreign_cache["timestamp"] is not None and
             (now - _foreign_cache["timestamp"]).total_seconds() < 1800):
         return _foreign_cache["data"]
     try:
-        url = "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham/"
-        r   = requests.get(url, timeout=15,
-                           headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        soup    = BeautifulSoup(r.text, "html.parser")
-        net_val = None
-        for table in soup.find_all("table"):
-            if not any(k in table.get_text().lower() for k in ("foreign","asing","net")):
-                continue
-            for row in table.find_all("tr"):
-                cells    = row.find_all(["td","th"])
-                row_text = " ".join(c.get_text(strip=True) for c in cells).lower()
-                if "net" in row_text and any(k in row_text for k in ("buy","sell","asing")):
-                    for cell in cells:
-                        try:
-                            val = float(cell.get_text(strip=True).replace(",","").replace(".",""))
-                            if abs(val) > 1_000_000:
-                                net_val = val / 1e9
-                                break
-                        except ValueError:
-                            continue
-                if net_val is not None:
-                    break
-            if net_val is not None:
+        d = now.date()
+        rows = []
+        for _ in range(5):  # skip back over weekends/holidays until a trading day has data
+            rows = _idx_get_stock_summary(d.strftime("%Y%m%d"))
+            if rows:
                 break
-        if net_val is None:
+            d -= timedelta(days=1)
+
+        if not rows:
             _foreign_cache.update({"data": None, "timestamp": now})
             return None
-        is_pos = net_val >= 0
-        label  = f"Net Buy +Rp {abs(net_val):.0f}B" if is_pos else f"Net Sell -Rp {abs(net_val):.0f}B"
-        res    = {"net_foreign_b": net_val, "label": label, "is_positive": is_pos}
+
+        net_shares_value = sum(
+            (float(r.get("ForeignBuy") or 0) - float(r.get("ForeignSell") or 0)) * float(r.get("Close") or 0)
+            for r in rows
+        )
+        net_val = net_shares_value / 1e9  # Rupiah -> billions
+        is_pos  = net_val >= 0
+        label   = f"Net Buy +Rp {abs(net_val):.0f}B" if is_pos else f"Net Sell -Rp {abs(net_val):.0f}B"
+        res     = {"net_foreign_b": net_val, "label": label, "is_positive": is_pos, "source": "idx_official_api"}
         _foreign_cache.update({"data": res, "timestamp": now})
         return res
     except Exception as e:
-        logger.debug(f"Foreign flow scraping failed: {e}")
+        logger.debug(f"Foreign flow (IDX API) failed: {e}")
         _foreign_cache.update({"data": None, "timestamp": now})
         return None
 
@@ -972,12 +988,23 @@ def check_and_save_outcomes():
         expire_cutoff = (datetime.now(WIB) - timedelta(days=7)).strftime("%Y-%m-%d")
         with _db_lock:
             con  = sqlite3.connect(CONFIG["DB_PATH"])
+            # Re-check any signal that hasn't reached a TERMINAL outcome yet (TP1/SL/EXPIRED).
+            # A signal with only PENDING check-ins (or none at all) must stay eligible for
+            # re-evaluation every day until it actually resolves — otherwise it gets frozen
+            # as PENDING forever after the first check and the win-rate sample silently
+            # skews toward whatever resolved same-day.
+            # signal_date < today: a same-day signal is never checked the day it was created,
+            # since today's day_high/day_low would include price action from BEFORE the
+            # signal existed — that's lookahead bias, not a genuine TP/SL hit.
             rows = con.execute("""
                 SELECT s.id, s.ticker, s.signal_date, s.entry_price, s.target1, s.stop_loss
                 FROM signals s
-                LEFT JOIN outcomes o ON o.signal_id = s.id
-                WHERE s.signal_date >= ? AND o.id IS NULL
-            """, (cutoff,)).fetchall()
+                WHERE s.signal_date >= ? AND s.signal_date < ?
+                  AND s.id NOT IN (
+                      SELECT signal_id FROM outcomes
+                      WHERE outcome_status IN ('TP1_HIT', 'SL_HIT', 'EXPIRED')
+                  )
+            """, (cutoff, today)).fetchall()
 
         tp_hits=0; sl_hits=0; pending=0; expired=0
         for row in rows:
