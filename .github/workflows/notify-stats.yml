@@ -1,0 +1,14 @@
+name: Notify profile stats
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger profile stats refresh
+        env:
+          GH_TOKEN: ${{ secrets.STATS_TOKEN }}
+        run: gh api repos/Dhiyaahaq33/Dhiyaahaq33/dispatches -f event_type=stats-refresh
