@@ -1,0 +1,35 @@
+name: IDX Cek Outcome Sinyal (sore)
+
+on:
+  schedule:
+    # 08:55 UTC = 15:55 WIB, Senin-Jumat (~5 menit setelah bursa tutup)
+    - cron: "55 8 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  outcomes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore scanner_history.db dari cache run sebelumnya
+        uses: actions/cache@v4
+        with:
+          path: scanner_history.db
+          key: scanner-db-${{ github.run_id }}
+          restore-keys: |
+            scanner-db-
+
+      - name: Cek outcome (TP/SL/Pending/Expired)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python idx_scanner.py --outcomes

@@ -70,6 +70,8 @@ Parameter lain yang bisa disesuaikan di dictionary `CONFIG`, `FILTER`, dan `RISK
 
 ## Menjalankan
 
+### Lokal (mode interaktif, 24 jam butuh komputer/server nyala terus)
+
 ```bash
 python idx_scanner.py
 ```
@@ -80,6 +82,25 @@ Setelah berjalan, bot akan:
 3. Melakukan scan otomatis tiap 30 menit selama jam bursa, dan mendengarkan perintah `/command` dari Telegram di thread terpisah.
 
 Log aktivitas tersimpan di `scanner.log`, dan riwayat sinyal tersimpan di `scanner_history.db` (SQLite, dibuat otomatis).
+
+### GitHub Actions (gratis, jalan 24/7 tanpa server sendiri)
+
+Karena mode lokal di atas butuh proses yang terus hidup, ada mode kedua yang gak butuh server: `idx_scanner.py --once` melakukan satu kali scan lalu keluar (skip otomatis kalau bursa lagi tutup), dipicu oleh cron GitHub Actions — pola yang sama dipakai project [`idx-algo-signal-surya`](https://github.com/Dhiyaahaq33/idx-algo-signal-surya).
+
+- `.github/workflows/scan.yml` — jalan tiap 30 menit selama jam bursa BEI (09:00–15:30 WIB, Senin–Jumat).
+- `.github/workflows/outcomes.yml` — jalan sekali tiap sore jam 15:55 WIB buat cek outcome (TP/SL/Pending/Expired) sinyal hari itu.
+
+Setup:
+1. Push repo ini ke GitHub.
+2. Di **Settings → Secrets and variables → Actions**, tambahkan repository secrets:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID`
+   - `FRED_API_KEY` (opsional)
+3. Workflow otomatis jalan sesuai jadwal cron, atau trigger manual lewat tab **Actions → (nama workflow) → Run workflow**.
+
+`scanner_history.db` tidak di-commit ke git (lihat `.gitignore`) — riwayat sinyal & win rate dipertahankan antar-run lewat GitHub Actions cache (`actions/cache`), sama seperti `signal.log` di `idx-algo-signal-surya`.
+
+**Keterbatasan mode GitHub Actions:** perintah interaktif Telegram (`/scan`, `/detail`, `/backtest`, dll.) **tidak aktif** di mode ini karena tidak ada proses yang terus listen ke Telegram — setiap run cron cuma proses sekali-jalan lalu mati. Kalau butuh command interaktif, jalankan `python idx_scanner.py` secara lokal (mode di atas).
 
 ## Disclaimer
 

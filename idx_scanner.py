@@ -31,6 +31,7 @@ PERINTAH BOT:
 
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -51,10 +52,12 @@ from bs4 import BeautifulSoup
 #  CONFIG — WAJIB DIISI
 # ══════════════════════════════════════════════════════════════════════════════
 
-TELEGRAM_BOT_TOKEN = "TOKEN_JOB"
-TELEGRAM_CHAT_ID   = "6052270268"
+# Env var (GitHub Actions secret) menang kalau ada; kalau kosong, pakai nilai hardcode di bawah
+# buat jalan lokal. Jangan pernah commit token asli ke sini.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "TOKEN_JOB"
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID") or "6052270268"
 
-FRED_API_KEY = ""
+FRED_API_KEY = os.environ.get("FRED_API_KEY") or ""
 
 SCAN_INTERVAL_MINUTES = 30
 MARKET_OPEN_HOUR,  MARKET_OPEN_MINUTE  = 9,  0
@@ -1978,9 +1981,54 @@ def main():
             time.sleep(300)
 
 
+def run_once():
+    """Satu kali scan + kirim sinyal, lalu keluar. Dipakai GitHub Actions cron
+    (lihat .github/workflows/scan.yml) sebagai pengganti loop 24 jam yang butuh
+    server yang terus hidup — tiap trigger cron cuma spin up proses baru, scan,
+    kirim ke Telegram, exit. Command interaktif (/detail, /backtest, dst) gak
+    aktif di mode ini karena gak ada proses yang listen terus; jalankan
+    `python idx_scanner.py` (tanpa flag) secara lokal kalau butuh itu."""
+    global _active_universe, _universe_last_validated
+
+    logger.info("IDX Stock Scanner v2.1 — run-once (GitHub Actions cron)")
+    init_database()
+    migrate_db_if_needed()
+
+    if CONFIG.get("ENABLE_UNIVERSE_VALIDATION"):
+        _active_universe = validate_universe(IDX_UNIVERSE)
+        _universe_last_validated = datetime.now(WIB).date()
+    else:
+        _active_universe = IDX_UNIVERSE.copy()
+
+    if not is_market_open():
+        logger.info(f"Pasar tutup ({datetime.now(WIB).strftime('%a %H:%M')} WIB). Skip scan.")
+        return
+
+    _run_and_send()
+
+    now = datetime.now(WIB)
+    if now.hour == 15 and now.minute >= 50:
+        check_and_save_outcomes()
+
+
+def run_outcomes_once():
+    """Cek outcome (TP/SL/Pending/Expired) sinyal hari ini, lalu keluar.
+    Dipakai GitHub Actions cron terpisah tiap sore jam 15:55 WIB
+    (lihat .github/workflows/outcomes.yml)."""
+    logger.info("IDX Stock Scanner v2.1 — outcomes-once (GitHub Actions cron)")
+    init_database()
+    migrate_db_if_needed()
+    check_and_save_outcomes()
+
+
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Scanner dihentikan.")
-        tg_send("🛑 IDX Scanner dihentikan.")
+    if "--once" in sys.argv:
+        run_once()
+    elif "--outcomes" in sys.argv:
+        run_outcomes_once()
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            logger.info("Scanner dihentikan.")
+            tg_send("🛑 IDX Scanner dihentikan.")
