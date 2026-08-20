@@ -1,0 +1,37 @@
+name: IDX Scan (30 menit, jam bursa)
+
+on:
+  schedule:
+    # 02:00-08:30 UTC = 09:00-15:30 WIB, Senin-Jumat, tiap 30 menit
+    - cron: "0,30 2-8 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # scanner_history.db sengaja gak masuk git (lihat .gitignore) - dipertahankan
+      # lewat Actions cache biar riwayat sinyal & win rate gak reset tiap run.
+      - name: Restore scanner_history.db dari cache run sebelumnya
+        uses: actions/cache@v4
+        with:
+          path: scanner_history.db
+          key: scanner-db-${{ github.run_id }}
+          restore-keys: |
+            scanner-db-
+
+      - name: Jalankan scan sekali
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python idx_scanner.py --once
